@@ -67,6 +67,11 @@ void rec_callback2(web_socket_data_package* data) {
 	ESP_LOGI(TAG, "rec2: %s", (char* )(data->data));
 }
 
+void rec_callback3(web_socket_data_package* data) {
+	const char* TAG = "client_task";
+	ESP_LOGI(TAG, "rec3: %s", (char* )(data->data));
+}
+
 static void client_task(void *pvParameters) {
 
 	const char* TAG = "client_task";
@@ -76,6 +81,9 @@ static void client_task(void *pvParameters) {
 	xEventGroupWaitBits(tcp_event_group, WIFI_CONNECTED_BIT, false, true,
 	portMAX_DELAY);
 
+	xTaskCreate(&web_socket_send_task, "send_task", 4096, NULL, 14, NULL);
+	xTaskCreate(&web_socket_recv_task, "recv_task", 4096, NULL, 13, NULL);
+
 	struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(8080),
 			.sin_addr.s_addr = inet_addr("192.168.75.153") };
 
@@ -83,33 +91,60 @@ static void client_task(void *pvParameters) {
 
 	web_socket_ctx ctx;
 	web_socket_ctx ctx2;
-
-	xTaskCreate(&web_socket_send_task, "send_task", 4096, NULL, 14, NULL);
-	xTaskCreate(&web_socket_recv_task, "recv_task", 4096, NULL, 13, NULL);
+	web_socket_ctx ctx3;
 
 	esp_err_t result = connect_websocket(&info, &ctx);
-	web_socket_recv_handler handler;
-	web_socket_recv_handler handler2;
 
 	if (result == ESP_OK) {
-		handler.socket_id = ctx.socket_id;
-		handler.recv_callback = &rec_callback1;
-		add_recv_task(&handler);
+		ctx.recv_callback = &rec_callback1;
+		add_recv_task(&ctx);
 	}
 
 	esp_err_t result2 = connect_websocket(&info, &ctx2);
 	if (result2 == ESP_OK) {
-		handler2.socket_id = ctx2.socket_id;
-		handler2.recv_callback = &rec_callback2;
-		add_recv_task(&handler2);
+		ctx2.recv_callback = &rec_callback2;
+		add_recv_task(&ctx2);
+	}
+
+	esp_err_t result3 = connect_websocket(&info, &ctx3);
+	if (result3 == ESP_OK) {
+		ctx3.recv_callback = &rec_callback3;
+		add_recv_task(&ctx3);
 	}
 
 	while (1) {
-		char* a = "hello fsgasdsgdasfsgd2";
 
-		send_string_data(&ctx, a, strlen(a));
-		send_string_data(&ctx2, a, strlen(a));
-		vTaskDelay(600 / portTICK_RATE_MS);
+		char* a1 = "hello fsgasdsgdasfsgd1";
+
+		char* a2 = "hello fsgasdsgdasfsgd2";
+
+		char* a3 = "hello fsgasdsgdasfsgd3";
+
+		send_string_data(&ctx, a1, strlen(a1));
+		send_string_data(&ctx2, a2, strlen(a2));
+		send_string_data(&ctx3, a3, strlen(a3));
+
+		if (ctx.state != CONNECTED) {
+
+			ESP_LOGI(TAG, "close1:---------------------------- ");
+		}
+
+		if (ctx2.state != CONNECTED) {
+			ESP_LOGI(TAG, "close2:---------------------------- ");
+
+		}
+
+		if (ctx3.state != CONNECTED) {
+			ESP_LOGI(TAG, "close3:---------------------------- ");
+
+		}
+
+		vTaskDelay(10 / portTICK_RATE_MS);
+
+		send_ping_data(&ctx);
+		send_ping_data(&ctx2);
+		send_ping_data(&ctx3);
+		vTaskDelay(100 / portTICK_RATE_MS);
 
 	}
 

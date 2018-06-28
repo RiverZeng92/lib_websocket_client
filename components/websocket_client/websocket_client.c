@@ -2,7 +2,7 @@
  * websocket_client.c
  *
  *  Created on: 2018年6月24日
- *      Author: ZLJ DJB
+ *      Author: ZLJ
  */
 
 #include "websocket_client.h"
@@ -43,13 +43,40 @@ CRLF;
 
 //数据发送队列
 QueueHandle_t sendDataQueue;
+SemaphoreHandle_t sendSemaphoreHandle;
+
+//数据接收队列
 QueueHandle_t recvDataQueue;
+SemaphoreHandle_t recvSemaphoreHandle;
+
+//tcp操作
+SemaphoreHandle_t pingSemaphoreHandle;
+
+/********
+ *
+ */
+bool hand_shake(int socket_id, char* path, char* host);
+
+bool analyze_request(int socket_id, char* path, char* host);
+
+int split_string(char* target, char* split, char** targetArray, int* count);
+
+void* malloc_and_reset(size_t size);
+
+char* sub_string(char* dest, int start, int end);
+
+int8_t send_data(web_socket_data_package* package);
+
+int send_char(int socket_id, uint8_t data);
 
 /************************
  * 数据交互 发送binary数据
- */
+ ************************/
 esp_err_t send_binary_data(web_socket_ctx* ctx, uint8_t* data,
 		uint16_t total_length) {
+
+	if (ctx->state != CONNECTED)
+		return ESP_FAIL;
 
 	web_socket_data_package *package =
 			(web_socket_data_package*) malloc_and_reset(
@@ -57,12 +84,72 @@ esp_err_t send_binary_data(web_socket_ctx* ctx, uint8_t* data,
 
 	package->socket_id = ctx->socket_id;
 	package->is_binary = 1;
+	package->is_ping = 0;
 	package->len = total_length;
 	package->data = data;
+	package->ctx = ctx;
 
 	if (sendDataQueue != NULL) {
 
+		xSemaphoreTake(sendSemaphoreHandle, portMAX_DELAY);
 		xQueueSendToBack(sendDataQueue, package, 500/portTICK_RATE_MS);
+		xSemaphoreGive(sendSemaphoreHandle);
+		return ESP_OK;
+	} else {
+		return ESP_FAIL;
+	}
+
+}
+
+/******************
+ * 发送ping
+ */
+esp_err_t send_ping_data(web_socket_ctx* ctx) {
+
+	if (ctx->state != CONNECTED)
+		return ESP_FAIL;
+
+	web_socket_data_package *package =
+			(web_socket_data_package*) malloc_and_reset(
+					sizeof(web_socket_data_package));
+
+	package->socket_id = ctx->socket_id;
+	package->is_ping = 1;
+	package->ctx = ctx;
+
+	if (sendDataQueue != NULL) {
+
+		xSemaphoreTake(sendSemaphoreHandle, portMAX_DELAY);
+		xQueueSendToBack(sendDataQueue, package, 500/portTICK_RATE_MS);
+		xSemaphoreGive(sendSemaphoreHandle);
+		return ESP_OK;
+	} else {
+		return ESP_FAIL;
+	}
+
+}
+
+/******************
+ * 发送pong
+ */
+esp_err_t send_pong_data(web_socket_ctx* ctx) {
+
+	if (ctx->state != CONNECTED)
+		return ESP_FAIL;
+
+	web_socket_data_package *package =
+			(web_socket_data_package*) malloc_and_reset(
+					sizeof(web_socket_data_package));
+
+	package->socket_id = ctx->socket_id;
+	package->is_ping = 2;
+	package->ctx = ctx;
+
+	if (sendDataQueue != NULL) {
+
+		xSemaphoreTake(sendSemaphoreHandle, portMAX_DELAY);
+		xQueueSendToBack(sendDataQueue, package, 500/portTICK_RATE_MS);
+		xSemaphoreGive(sendSemaphoreHandle);
 		return ESP_OK;
 	} else {
 		return ESP_FAIL;
@@ -76,18 +163,25 @@ esp_err_t send_binary_data(web_socket_ctx* ctx, uint8_t* data,
 esp_err_t send_string_data(web_socket_ctx* ctx, char* data,
 		uint16_t total_length) {
 
+	if (ctx->state != CONNECTED)
+		return ESP_FAIL;
+
 	web_socket_data_package *package =
 			(web_socket_data_package*) malloc_and_reset(
 					sizeof(web_socket_data_package));
 
 	package->socket_id = ctx->socket_id;
 	package->is_binary = 0;
+	package->is_ping = 0;
 	package->len = total_length;
 	package->data = data;
+	package->ctx = ctx;
 
 	if (sendDataQueue != NULL) {
 
+		xSemaphoreTake(sendSemaphoreHandle, portMAX_DELAY);
 		xQueueSendToBack(sendDataQueue, package, 500/portTICK_RATE_MS);
+		xSemaphoreGive(sendSemaphoreHandle);
 		return ESP_OK;
 	} else {
 		return ESP_FAIL;
@@ -102,26 +196,270 @@ void web_socket_send_task(void *param) {
 
 	sendDataQueue = xQueueCreate(SEND_DATA_QUEUE_DEPTH,
 			sizeof(web_socket_data_package));
+
+	sendSemaphoreHandle = xSemaphoreCreateMutex();
+
 	while (1) {
 
 		web_socket_data_package* data_package =
 				(web_socket_data_package*) malloc_and_reset(
 						sizeof(web_socket_data_package));
-		int xstatus = xQueueReceive(sendDataQueue, data_package,
-				1000 /portTICK_RATE_MS);
+
+		xSemaphoreTake(sendSemaphoreHandle, portMAX_DELAY);
+		int xstatus = xQueueReceive(sendDataQueue, data_package,10 /portTICK_RATE_MS);
+		xSemaphoreGive(sendSemaphoreHandle);
+
 		if (xstatus != pdPASS)
 			continue;
 
 		//send(data_package.socket_id, data_package.data, data_package.len, 0);
-		send_data(data_package);
+		int8_t ret = send_data(data_package);
+		if (ret < 0) {
+
+			data_package->ctx->state = DISCONNECT;
+		}
+
 		free(data_package);
 
-		vTaskDelay(10 / portTICK_PERIOD_MS);
+		vTaskDelay(1 / portTICK_PERIOD_MS);
 	}
 
 }
 
-void send_data(web_socket_data_package* package) {
+/******************
+ * 数据接收任务
+ *****************/
+
+void* recv_handler_out_queue(QueueHandle_t *queue) {
+
+	web_socket_ctx* ctx =
+			(web_socket_ctx*) malloc_and_reset(
+					sizeof(web_socket_ctx));
+
+	xSemaphoreTake(recvSemaphoreHandle, portMAX_DELAY);
+	int xstatus = xQueueReceive(queue, ctx, 10 /portTICK_RATE_MS);
+	xSemaphoreGive(recvSemaphoreHandle);
+
+	if (xstatus == pdPASS) {
+		return ctx;
+	} else {
+		free(ctx);
+		return NULL;
+	}
+}
+
+int non_blocking_recv_char(int socket_id, uint8_t* data) {
+
+	int len = recv(socket_id, data, sizeof(uint8_t) * 1, MSG_DONTWAIT);
+	return len;
+}
+
+int8_t handle_stream(web_socket_ctx *handler) {
+
+	uint8_t rec_data;
+
+	int rec_len = non_blocking_recv_char(handler->socket_id, &rec_data);
+	if (rec_len == 0)
+		return 0;
+
+	else if (rec_len < 0)
+		return -1;
+
+	uint8_t msgtype;
+	uint8_t bite;
+	uint16_t length = 0;
+	uint8_t mask[4];
+	uint8_t index;
+	unsigned int i;
+	bool hasMask = false;
+
+	msgtype = rec_data;
+
+	rec_len = non_blocking_recv_char(handler->socket_id, &rec_data);
+	if (rec_len == 0)
+		return 0;
+
+	else if (rec_len < 0)
+		return -1;
+
+	if (rec_data & WS_MASK) {
+		hasMask = true;
+		length = rec_data & ~WS_MASK;
+	} else {
+		length = rec_data;
+	}
+
+	index = 6;
+
+	if (length == WS_SIZE16) {
+		uint8_t data;
+		rec_len = non_blocking_recv_char(handler->socket_id, &data);
+		if (rec_len == 0)
+			return 0;
+
+		else if (rec_len < 0)
+			return -1;
+
+		length = data << 8;
+
+		rec_len = non_blocking_recv_char(handler->socket_id, &data);
+		if (rec_len == 0)
+			return 0;
+
+		else if (rec_len < 0)
+			return -1;
+
+		length |= data;
+	} else if (length == WS_SIZE64) {
+		return -2;
+	}
+
+	if (hasMask) {
+
+		rec_len = non_blocking_recv_char(handler->socket_id, mask[0]);
+		if (rec_len == 0)
+			return 0;
+
+		else if (rec_len < 0)
+			return -1;
+
+		rec_len = non_blocking_recv_char(handler->socket_id, mask[1]);
+		if (rec_len == 0)
+			return 0;
+
+		else if (rec_len < 0)
+			return -1;
+
+		rec_len = non_blocking_recv_char(handler->socket_id, mask[2]);
+		if (rec_len == 0)
+			return 0;
+
+		else if (rec_len < 0)
+			return -1;
+
+		rec_len = non_blocking_recv_char(handler->socket_id, mask[3]);
+		if (rec_len == 0)
+			return 0;
+
+		else if (rec_len < 0)
+			return -1;
+
+	}
+
+	uint8_t opcode = msgtype & ~WS_FIN;
+
+	if (opcode == WS_OPCODE_CLOSE) {
+		ESP_LOGI(TAG, "task close =--------------------");
+		return -3;
+	} else if (opcode == WS_OPCODE_PING) {
+		send_pong_data(handler);
+		return 1;
+
+	} else if (opcode == WS_OPCODE_PONG) {
+
+		return 2;
+
+	} else if (opcode == WS_OPCODE_BINARY || opcode == WS_OPCODE_TEXT) {
+
+		web_socket_data_package* package =
+				(web_socket_data_package*) malloc_and_reset(
+						sizeof(web_socket_data_package));
+
+		uint8_t* data;
+		if (opcode == WS_OPCODE_TEXT) {
+			data = (uint8_t*) malloc_and_reset(sizeof(uint8_t) * (length + 1));
+			data[length] = '\0';
+		} else
+			data = (uint8_t*) malloc_and_reset(sizeof(uint8_t) * length);
+
+		rec_data = recv(handler->socket_id, data, sizeof(uint8_t) * length,
+		MSG_WAITALL);
+
+		if (rec_data < 0)
+			return -1;
+
+		package->data = data;
+		package->is_binary = opcode == WS_OPCODE_BINARY ? 1 : 0;
+		package->len = length;
+
+		package->socket_id = handler->socket_id;
+
+		handler->recv_callback(package);
+		free(package);
+
+		return 1;
+
+	} else {
+//		char* free_data = (char*) malloc_and_reset(sizeof(char) * 128);
+//		free_data[127] = '\0';
+//		int len = recv(handler->socket_id, free_data, sizeof(char) * 126,
+//				MSG_DONTWAIT);
+//		ESP_LOGI(TAG, "rec123:---------------------------- %s %d", free_data, len);
+//		free(free_data);
+	}
+
+	return -1;
+
+}
+
+int8_t websocket_ping(int socket_id) {
+
+	int8_t ret_len;
+
+	uint8_t mask[4];
+
+	uint16_t len = 0;
+
+	send_char(socket_id, (uint8_t) (WS_FIN | WS_OPCODE_PING));
+
+	send_char(socket_id, (uint8_t) (len | WS_MASK));
+
+	mask[0] = (uint8_t) (rand() % 255);
+	mask[1] = (uint8_t) (rand() % 255);
+	mask[2] = (uint8_t) (rand() % 255);
+	mask[3] = (uint8_t) (rand() % 255);
+
+	ret_len = send(socket_id, mask, sizeof(uint8_t) * 4, 0);
+
+	return ret_len;
+}
+
+int8_t websocket_pong(int socket_id) {
+
+	int8_t ret_len;
+
+	uint8_t mask[4];
+
+	uint16_t len = 0;
+
+	send_char(socket_id, (uint8_t) (WS_FIN | WS_OPCODE_PONG));
+
+	send_char(socket_id, (uint8_t) (len | WS_MASK));
+
+	mask[0] = (uint8_t) (rand() % 255);
+	mask[1] = (uint8_t) (rand() % 255);
+	mask[2] = (uint8_t) (rand() % 255);
+	mask[3] = (uint8_t) (rand() % 255);
+
+	ret_len = send(socket_id, mask, sizeof(uint8_t) * 4, 0);
+
+	return ret_len;
+}
+
+int8_t send_data(web_socket_data_package* package) {
+
+	int ret_len = 0;
+	if (package->is_ping == 1) {
+		ret_len = websocket_ping(package->socket_id);
+
+		return ret_len;
+	}
+
+	if (package->is_ping == 2) {
+		ret_len = websocket_pong(package->socket_id);
+
+		return ret_len;
+	}
 
 	uint8_t mask[4];
 
@@ -156,185 +494,10 @@ void send_data(web_socket_data_package* package) {
 
 	for (int i = 0; i < len; ++i) {
 		uint8_t tmp = data[i];
-		send_char(socket_id, tmp ^ mask[i % 4]);
+		ret_len = send_char(socket_id, tmp ^ mask[i % 4]);
 	}
 
-}
-
-/******************
- * 数据接收任务
- *****************/
-
-void* recv_handler_out_queue(QueueHandle_t *queue) {
-
-	web_socket_recv_handler* handler =
-			(web_socket_recv_handler*) malloc_and_reset(
-					sizeof(web_socket_recv_handler));
-
-	int xstatus = xQueueReceive(queue, handler, 100 /portTICK_RATE_MS);
-
-	if (xstatus == pdPASS) {
-		return handler;
-	} else {
-		free(handler);
-		return NULL;
-	}
-}
-
-uint8_t non_blocking_recv_char(int socket_id, uint8_t* data) {
-
-	int len = recv(socket_id, data, sizeof(uint8_t) * 1, MSG_DONTWAIT);
-
-	return len;
-}
-
-int8_t handle_stream(web_socket_recv_handler *handler) {
-
-
-	uint8_t rec_data;
-
-
-	int8_t rec_len = non_blocking_recv_char(handler->socket_id, &rec_data);
-	if (rec_len == 0)
-		return 0;
-
-	else if (rec_len < 0)
-		return -1;
-
-
-	uint8_t msgtype;
-	uint8_t bite;
-	uint16_t length=0;
-	uint8_t mask[4];
-	uint8_t index;
-	unsigned int i;
-	bool hasMask = false;
-
-
-	msgtype = rec_data;
-
-	rec_len = non_blocking_recv_char(handler->socket_id, &rec_data);
-	if (rec_len == 0)
-		return 0;
-
-	else if (rec_len < 0)
-		return -1;
-
-
-	if (rec_data & WS_MASK) {
-		hasMask = true;
-		length = rec_data & ~WS_MASK;
-	} else {
-		length = rec_data ;
-	}
-
-
-
-	index = 6;
-
-
-	if (length == WS_SIZE16) {
-		uint8_t data;
-		rec_len = non_blocking_recv_char(handler->socket_id, &data);
-		if (rec_len == 0)
-			return 0;
-
-		else if (rec_len > 127)
-			return -1;
-
-		length = data << 8;
-
-		rec_len = non_blocking_recv_char(handler->socket_id, &data);
-		if (rec_len == 0)
-			return 0;
-
-		else if (rec_len > 127)
-			return -1;
-
-		length |= data;
-	} else if (length == WS_SIZE64) {
-		return -2;
-	}
-
-
-	if (hasMask) {
-
-		rec_len = non_blocking_recv_char(handler->socket_id, mask[0]);
-		if (rec_len == 0)
-			return 0;
-
-		else if (rec_len > 127)
-			return -1;
-
-		rec_len = non_blocking_recv_char(handler->socket_id, mask[1]);
-		if (rec_len == 0)
-			return 0;
-
-		else if (rec_len > 127)
-			return -1;
-
-		rec_len = non_blocking_recv_char(handler->socket_id, mask[2]);
-		if (rec_len == 0)
-			return 0;
-
-		else if (rec_len > 127)
-			return -1;
-
-		rec_len = non_blocking_recv_char(handler->socket_id, mask[3]);
-		if (rec_len == 0)
-			return 0;
-
-		else if (rec_len > 127)
-			return -1;
-
-	}
-
-	uint8_t opcode = msgtype & ~WS_FIN;
-
-
-	if (opcode == WS_OPCODE_CLOSE) {
-		return -3;
-	} else if (opcode == WS_OPCODE_PING) {
-
-		int ret = send_char(handler->socket_id, WS_FIN | WS_OPCODE_PONG);
-		if (ret < 1)
-			return -1;
-		else
-			return 1;
-	}
-
-
-	web_socket_data_package* package =(web_socket_data_package*) malloc_and_reset(sizeof(web_socket_data_package));
-
-
-	uint8_t* data;
-	if(opcode == WS_OPCODE_TEXT){
-		data = (uint8_t*)malloc_and_reset(sizeof(uint8_t) * (length+1));
-		data[length] = '\0';
-	}
-	else
-		data = (uint8_t*)malloc_and_reset(sizeof(uint8_t) * length);
-
-
-	rec_data = recv(handler->socket_id, data, sizeof(uint8_t) * length,MSG_WAITALL);
-
-
-
-	if (rec_data < 0)
-		return -1;
-
-	package->data = data;
-	package->is_binary = opcode == WS_OPCODE_BINARY ? 1 : 0;
-	package->len = length;
-
-	package->socket_id = handler->socket_id;
-
-	handler->recv_callback(package);
-	free(package);
-
-
-
-	return 1;
+	return ret_len;
 
 }
 
@@ -349,10 +512,15 @@ xListItem* get_list_next(xList *pxList) {
 
 }
 
-esp_err_t add_recv_task(web_socket_recv_handler* handler) {
-	if (recvDataQueue != NULL) {
+esp_err_t add_recv_task(web_socket_ctx *ctx) {
 
-		xQueueSendToBack(recvDataQueue, handler, 500/portTICK_RATE_MS);
+	if (ctx->state != CONNECTED)
+		return ESP_FAIL;
+
+	if (recvDataQueue != NULL) {
+		xSemaphoreTake(recvSemaphoreHandle, portMAX_DELAY);
+		xQueueSendToBack(recvDataQueue, ctx, 500/portTICK_RATE_MS);
+		xSemaphoreGive(recvSemaphoreHandle);
 
 		return ESP_OK;
 	} else {
@@ -363,7 +531,9 @@ esp_err_t add_recv_task(web_socket_recv_handler* handler) {
 void web_socket_recv_task(void* params) {
 
 	recvDataQueue = xQueueCreate(RECV_DATA_QUEUE_DEPTH,
-			sizeof(web_socket_recv_handler));
+			sizeof(web_socket_ctx));
+
+	recvSemaphoreHandle = xSemaphoreCreateMutex();
 
 	xList *handler_list = (xList*) malloc_and_reset(sizeof(xList));
 
@@ -371,7 +541,7 @@ void web_socket_recv_task(void* params) {
 
 	while (1) {
 
-		web_socket_recv_handler* handler = recv_handler_out_queue(
+		web_socket_ctx* handler = recv_handler_out_queue(
 				recvDataQueue);
 
 		xListItem* handler_tmp = NULL;
@@ -397,14 +567,27 @@ void web_socket_recv_task(void* params) {
 			continue;
 		}
 
+		web_socket_ctx* handler_tmp_h =
+				(web_socket_ctx*) (handler_tmp->pvOwner);
 
-		int ret = handle_stream(
-				(web_socket_recv_handler*) (handler_tmp->pvOwner));
-//		if (ret < 0) {
-//			uxListRemove(handler);
-//		}
+		if (handler_tmp_h->state != CONNECTED) {
+			//close(handler_tmp_h->socket_id);
+			handler_tmp_h->state = DISCONNECT;
 
-		vTaskDelay(20 / portTICK_PERIOD_MS);
+			uxListRemove(handler_tmp);
+
+			goto final;
+		}
+
+		int8_t ret_tmp_data = handle_stream(handler_tmp_h);
+
+		if (ret_tmp_data == -3) {
+			close(handler_tmp_h->socket_id);
+			handler_tmp_h->state = DISCONNECT;
+			uxListRemove(handler_tmp);
+		}
+
+		final: vTaskDelay(1 / portTICK_PERIOD_MS);
 
 	}
 
@@ -546,8 +729,9 @@ char* sub_string(char* dest, int start, int end) {
 	return p;
 }
 
-uint8_t send_char(int socket_id, uint8_t data) {
+int send_char(int socket_id, uint8_t data) {
 	uint8_t tmp = data;
-	return send(socket_id, &tmp, 1, MSG_DONTWAIT);
+	int len = send(socket_id, &tmp, 1, MSG_DONTWAIT);
+	return len;
 }
 

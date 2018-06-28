@@ -90,24 +90,30 @@ typedef enum{
 	CONNECTED
 } ws_conn_state;
 
-/**
- * websocket的上下文
- */
-typedef struct {
 
-	int socket_id;
-	ws_conn_state state;
-} web_socket_ctx;
+
+struct web_socket_ctx;
 
 /**
  * websocket发送数据
  */
 typedef struct {
+	struct web_socket_ctx *ctx;
 	int socket_id;
 	void* data;
 	uint8_t is_binary;
+	uint8_t is_ping;
 	uint16_t len;
 } web_socket_data_package;
+
+/**
+ * websocket的上下文
+ */
+typedef struct web_socket_ctx {
+	int socket_id;
+	ws_conn_state state;
+	void (*recv_callback)(web_socket_data_package*  data);
+} web_socket_ctx;
 
 
 /**
@@ -118,38 +124,29 @@ typedef struct {
 /**
  * websocket接收数据
  */
-typedef struct {
-	int socket_id;
-	void (*recv_callback)(web_socket_data_package* data);
-} web_socket_recv_handler;
+//typedef struct {
+//	web_socket_ctx *ctx;
+//	int socket_id;
+//
+//} web_socket_recv_handler;
 
 
+void web_socket_send_task(void *param);
 
 esp_err_t connect_websocket(web_socket_info *info, web_socket_ctx *ctx);
 
-bool hand_shake(int socket_id, char* path, char* host);
 
-bool analyze_request(int socket_id, char* path, char* host);
-
-int split_string(char* target, char* split, char** targetArray, int* count);
-
-void* malloc_and_reset(size_t size);
-
-char* sub_string(char* dest, int start, int end);
-
-void send_data(web_socket_data_package* package);
-
-void web_socket_send_task(void *param);
+void web_socket_recv_task(void* params);
 
 esp_err_t send_string_data(web_socket_ctx* ctx, char* data, uint16_t total_length);
 
 esp_err_t send_binary_data(web_socket_ctx* ctx, uint8_t* data, uint16_t total_length);
 
-uint8_t send_char(int socket_id, uint8_t data);
+esp_err_t add_recv_task(web_socket_ctx* ctx);
 
-esp_err_t add_recv_task(web_socket_recv_handler* handler);
+esp_err_t send_ping_data(web_socket_ctx* ctx);
 
-void web_socket_recv_task(void* params);
+
 
 #endif
 
