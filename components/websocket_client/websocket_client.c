@@ -89,6 +89,8 @@ esp_err_t send_binary_data(web_socket_ctx* ctx, uint8_t* data,
 	package->data = data;
 	package->ctx = ctx;
 
+
+
 	if (sendDataQueue != NULL) {
 
 		xSemaphoreTake(sendSemaphoreHandle, portMAX_DELAY);
@@ -209,8 +211,11 @@ void web_socket_send_task(void *param) {
 		int xstatus = xQueueReceive(sendDataQueue, data_package,10 /portTICK_RATE_MS);
 		xSemaphoreGive(sendSemaphoreHandle);
 
-		if (xstatus != pdPASS)
+		if (xstatus != pdPASS){
+			free(data_package);
 			continue;
+		}
+
 
 		//send(data_package.socket_id, data_package.data, data_package.len, 0);
 		int8_t ret = send_data(data_package);
@@ -221,7 +226,7 @@ void web_socket_send_task(void *param) {
 
 		free(data_package);
 
-		vTaskDelay(1 / portTICK_PERIOD_MS);
+		vTaskDelay(10 / portTICK_PERIOD_MS);
 	}
 
 }
@@ -349,7 +354,6 @@ int8_t handle_stream(web_socket_ctx *handler) {
 	uint8_t opcode = msgtype & ~WS_FIN;
 
 	if (opcode == WS_OPCODE_CLOSE) {
-		ESP_LOGI(TAG, "task close =--------------------");
 		return -3;
 	} else if (opcode == WS_OPCODE_PING) {
 		send_pong_data(handler);
@@ -473,6 +477,7 @@ int8_t send_data(web_socket_data_package* package) {
 
 	if (package->is_binary) {
 		send_char(socket_id, (uint8_t) (WS_FIN | WS_OPCODE_BINARY));
+
 	} else {
 		send_char(socket_id, (uint8_t) (WS_FIN | WS_OPCODE_TEXT));
 	}
@@ -493,8 +498,10 @@ int8_t send_data(web_socket_data_package* package) {
 	send(socket_id, mask, sizeof(uint8_t) * 4, 0);
 
 	for (int i = 0; i < len; ++i) {
+
 		uint8_t tmp = data[i];
 		ret_len = send_char(socket_id, tmp ^ mask[i % 4]);
+
 	}
 
 	return ret_len;
@@ -587,7 +594,7 @@ void web_socket_recv_task(void* params) {
 			uxListRemove(handler_tmp);
 		}
 
-		final: vTaskDelay(1 / portTICK_PERIOD_MS);
+		final: vTaskDelay(10 / portTICK_PERIOD_MS);
 
 	}
 
@@ -731,7 +738,7 @@ char* sub_string(char* dest, int start, int end) {
 
 int send_char(int socket_id, uint8_t data) {
 	uint8_t tmp = data;
-	int len = send(socket_id, &tmp, 1, MSG_DONTWAIT);
+	int len = send(socket_id, &tmp, 1, 0);
 	return len;
 }
 

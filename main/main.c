@@ -85,7 +85,7 @@ static void client_task(void *pvParameters) {
 	xTaskCreate(&web_socket_recv_task, "recv_task", 4096, NULL, 13, NULL);
 
 	struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons(8080),
-			.sin_addr.s_addr = inet_addr("192.168.75.153") };
+			.sin_addr.s_addr = inet_addr("192.168.75.187") };
 
 	web_socket_info info = { .server_addr = addr, .path = "/" };
 
@@ -112,6 +112,7 @@ static void client_task(void *pvParameters) {
 		add_recv_task(&ctx3);
 	}
 
+	uint8_t a4[5] = {0xff, 0xff, 0xaa, 0xaa, 0xaa};
 	while (1) {
 
 		char* a1 = "hello fsgasdsgdasfsgd1";
@@ -120,9 +121,13 @@ static void client_task(void *pvParameters) {
 
 		char* a3 = "hello fsgasdsgdasfsgd3";
 
+
+
 		send_string_data(&ctx, a1, strlen(a1));
 		send_string_data(&ctx2, a2, strlen(a2));
-		send_string_data(&ctx3, a3, strlen(a3));
+		//send_string_data(&ctx3, a3, strlen(a3));
+
+		send_binary_data(&ctx3, a4, 5);
 
 		if (ctx.state != CONNECTED) {
 
@@ -144,7 +149,7 @@ static void client_task(void *pvParameters) {
 		send_ping_data(&ctx);
 		send_ping_data(&ctx2);
 		send_ping_data(&ctx3);
-		vTaskDelay(100 / portTICK_RATE_MS);
+		vTaskDelay(300/ portTICK_RATE_MS);
 
 	}
 
